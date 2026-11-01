@@ -36,7 +36,7 @@ export const LIGHTS: Record<LightName, LightPreset> = {
   // The sun light is reused as the lamp key: low, from the side (az 60, el 25), short shadows.
   lamp: {
     az: 60, el: 25,
-    lit: [1.55, 0.92, 0.48], shade: [0.09, 0.08, 0.2], lift: [0.03, 0.03, 0.1], lambert: 0.45, sideK: 0.8, term: 0.12,
+    lit: [1.6, 0.98, 0.52], shade: [0.16, 0.12, 0.17], lift: [0.03, 0.022, 0.05], lambert: 0.45, sideK: 0.8, term: 0.12,
     charTint: [1.0, 0.82, 0.62], charShade: 0.84, charGrad: 0.12, bodyGrad: 0.28, sideTint: [0.78, 0.74, 0.95],
     blob: [0.55, 0.5, 0.7], actorShadow: true,
     top: "#07060d", hor: "#1a1428", skyCurve: [0.0, 0.5, 1.0], fog: "#1a1428", fogNear: 6, fogFar: 45, sunDisc: "#000000",

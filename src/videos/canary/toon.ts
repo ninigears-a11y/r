@@ -961,7 +961,8 @@ export const drawOwen = (p: Pen, o: OwenOpts = {}) => {
   // 6) soot
   if (o.soot ?? true) {
     p.g.globalAlpha = 0.35;
-    p.ell(418, 520, 34, 18, "#1a1220", 0, 0, 360, -15); p.ell(196, 300, 22, 12, "#1a1220", 0, 0, 360, 20);
+    // small coal specks on the crown and the shoulder (never on the cheeks: no blush)
+    for (const [x, y, r] of [[196, 330, 9], [214, 318, 6], [404, 350, 7], [172, 640, 8], [186, 662, 5]] as const) p.ell(x, y, r * 1.4, r, "#1a1220", 0, 0, 360, 20);
     p.g.globalAlpha = 1;
   }
   // 7) eyes
@@ -1004,3 +1005,90 @@ export const drawOwen = (p: Pen, o: OwenOpts = {}) => {
     p.stroke([[262, 518], [300, 526], [338, 518]], 8);
   }
 };
+
+// ---------------- the canary in its brass cage (one card, 600 x 1000 design, base at y = 975) ----------------
+export type BirdPose = "perch" | "sway" | "fallen" | "wake";
+export type CageOpts = { pose?: BirdPose; sway?: number; sing?: number; blink?: boolean | number; o2?: boolean; hiss?: number; light?: number };
+const BRASS = "#d1a540", BRASS_SH = "#9a7428", CAN = "#ffd43b", CAN_SH = "#e0a923", CAN_WING = "#f2bb28";
+const canaryBird = (p: Pen, o: CageOpts) => {
+  const pose = o.pose ?? "perch", lid = lidOf(o.blink), light = o.light ?? DEF_LIGHT;
+  const down = pose === "fallen" || pose === "wake";
+  // pivot: feet on the perch (300, 640) or lying on the tray (300, 880)
+  const px = 300, py = down ? 872 : 640;
+  const ang = pose === "sway" ? rad(o.sway ?? 0) : pose === "fallen" ? rad(-96) : pose === "wake" ? rad(-62) : 0;
+  p.rot = ang ? [ang, px, py] : null;
+  const by = py - 78;
+  // tail, body, wing, head
+  p.poly([[px - 70, by + 20], [px - 150, by + 70], [px - 128, by + 92], [px - 52, by + 52]], CAN_SH, 9);
+  const body = ellPts(px, by, 92, 74, 0, 360, -12);
+  p.poly(body, null, 18); p.shadedFill(body, CAN, CAN_SH, light, 92, 0.3);
+  const wing = ellPts(px - 16, by + 8, 56, 34, 0, 360, -18);
+  p.poly(wing, CAN_WING, 8); p.stroke([[px - 44, by + 14], [px + 6, by + 22]], 6);
+  const head = ellPts(px + 58, by - 76, 60, 56);
+  p.poly(head, null, 18); p.shadedFill(head, CAN, CAN_SH, light, 60, 0.3);
+  // beak (opens while singing)
+  const open = clamp(o.sing ?? 0, 0, 1) * 16;
+  p.poly([[px + 108, by - 86 - open * 0.3], [px + 146, by - 74], [px + 108, by - 64]], "#f08a24", 7);
+  if (open > 1) p.poly([[px + 108, by - 64], [px + 140, by - 58 + open], [px + 106, by - 54 + open * 0.6]], "#d96c14", 7);
+  // eye: X when knocked out, line when blinking, dot otherwise
+  const ex = px + 76, ey = by - 86;
+  if (pose === "fallen") { p.stroke([[ex - 12, ey - 12], [ex + 12, ey + 12]], 8); p.stroke([[ex - 12, ey + 12], [ex + 12, ey - 12]], 8); }
+  else if (lid >= 0.5) p.arc(ex, ey + 2, 14, 6, 10, 170, 8);
+  else p.dot(ex, ey, 11);
+  // legs
+  if (!down) { p.stroke([[px - 10, by + 66], [px - 14, py]], 7); p.stroke([[px + 22, by + 66], [px + 24, py]], 7); }
+  p.rot = null;
+};
+export const drawCage = (p: Pen, o: CageOpts = {}) => {
+  const light = o.light ?? DEF_LIGHT;
+  const x0 = 110, x1 = 490, yTop = 330, yBase = 900;
+  const dome = (x: number) => yTop - Math.sqrt(Math.max(0, 1 - ((x - 300) / 190) ** 2)) * 150;
+  // sealed perspex sides on the oxygen cage (painted silver frame + pale glass), drawn behind the bird
+  if (o.o2) {
+    const glass: P2[] = [[x0, yBase], [x0, yTop]];
+    for (let x = x0; x <= x1; x += 10) glass.push([x, dome(x)]);
+    glass.push([x1, yTop], [x1, yBase]);
+    p.g.globalAlpha = 0.28; p.poly(glass, "#bfe3ff", 0); p.g.globalAlpha = 1;
+  }
+  // back bars
+  for (let x = x0 + 25; x < x1; x += 50) p.stroke([[x, dome(x) + 6], [x, yBase]], 6, BRASS_SH);
+  // perch
+  p.band([[150, 640], [450, 640]], "#8a5a3c", 16, 5, "round");
+  canaryBird(p, o);
+  // front bars + rings
+  for (let x = x0; x <= x1; x += 50) { p.stroke([[x, dome(x)], [x, yBase]], 13, INK); p.stroke([[x, dome(x)], [x, yBase]], 7, BRASS); }
+  const domeArc: P2[] = []; for (let x = x0; x <= x1; x += 8) domeArc.push([x, dome(x)]);
+  p.stroke(domeArc, 15, INK); p.stroke(domeArc, 8, BRASS);
+  for (const y of [yTop + 40, 760]) { p.stroke([[x0 - 6, y], [x1 + 6, y]], 15, INK); p.stroke([[x0 - 6, y], [x1 + 6, y]], 8, BRASS); }
+  // base tray
+  const tray = rrect(80, yBase - 6, 520, 975, 14);
+  p.gradFill(tray, BRASS, BRASS_SH, light); p.poly(tray, null, 11);
+  p.stroke([[96, yBase + 30], [504, yBase + 30]], 5, BRASS_SH);
+  if (o.o2) {
+    // oxygen cylinder on top with a valve and gauge; painted black, brass valve
+    const cyl = rrect(255, 40, 345, yTop - 150 + 20, 30);
+    p.gradFill(cyl, "#3a3a46", "#16141c", light); p.poly(cyl, null, 11);
+    p.poly(rrect(282, 12, 318, 48, 8), BRASS, 9);
+    p.stroke([[300, yTop - 150 + 20], [300, yTop - 120]], 14, INK); p.stroke([[300, yTop - 150 + 20], [300, yTop - 120]], 7, BRASS);
+    p.ell(380, 120, 34, 34, "#f4f1e6", 9); p.stroke([[380, 120], [396, 100]], 6, "#c8463a");
+    p.stroke([[345, 120], [346, 120]], 10);
+    // hiss puffs
+    const h = clamp(o.hiss ?? 0, 0, 1);
+    if (h > 0.02) {
+      p.g.globalAlpha = 0.55 * h;
+      for (let i = 0; i < 3; i++) p.ell(300 + (i - 1) * 40, yTop - 60 + i * 10, 26 + 10 * i * h, 18 + 6 * i * h, "#ffffff", 0);
+      p.g.globalAlpha = 1;
+    }
+  } else {
+    // hanging ring
+    p.ell(300, yTop - 175, 30, 30, null, 0);
+    p.arc(300, yTop - 185, 30, 30, 0, 360, 15, INK); p.arc(300, yTop - 185, 30, 30, 0, 360, 8, BRASS);
+  }
+};
+
+/** miner outfit for the crew (dark jacket, flat cap, soot-grey trousers) */
+export const miner = (v = 0): Outfit => ({
+  jacket: ["#5a4a3c", "#3f4a5a", "#4f5a3c", "#6a3f36"][v % 4], pants: ["#3b3f52", "#4a4038", "#2f3540", "#45403a"][v % 4], boots: INK,
+  hat: "cap", cap: ["#3b3b44", "#5a4636", "#2f3a4a", "#4a3a2a"][v % 4], moustache: v === 1 ? "#4a3020" : undefined, build: v === 2 ? "stout" : "adult",
+  skin: SKINS[v % SKINS.length],
+});
