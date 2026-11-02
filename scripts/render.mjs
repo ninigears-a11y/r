@@ -14,6 +14,6 @@ const composition = await selectComposition({ serveUrl, id: process.env.COMP || 
 const frameRange = range ? range.split("-").map(Number) : null;
 const t0 = Date.now(); let last = 0;
 await renderMedia({ composition, serveUrl, codec: "h264", crf: 16, outputLocation: out, inputProps, browserExecutable, chromiumOptions,
-  scale: Number(dpr), concurrency: Number(process.env.CONC || 4), timeoutInMilliseconds: 600000, ...(frameRange ? { frameRange } : {}),
+  scale: Number(dpr), concurrency: Number(process.env.CONC || 4), timeoutInMilliseconds: 120000, ...(frameRange ? { frameRange } : {}),
   onProgress: ({ renderedFrames }) => { const s = Math.floor((Date.now() - t0) / 1000); if (s - last >= 30) { last = s; console.log(`${s}s rendered ${renderedFrames}`); } } });
 console.log("done", ((Date.now() - t0) / 1000).toFixed(0) + "s");

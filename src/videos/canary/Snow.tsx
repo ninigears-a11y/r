@@ -7,7 +7,7 @@
 // Place changes crossfade by stacking a second canvas for the fade frames; the hook ends on a 4-frame white flash.
 import React, { useEffect, useMemo, useState } from "react";
 import * as THREE from "three";
-import { AbsoluteFill, continueRender, delayRender, getInputProps, useCurrentFrame } from "remotion";
+import { AbsoluteFill, cancelRender, continueRender, delayRender, getInputProps, useCurrentFrame } from "remotion";
 import { ThreeCanvas } from "@remotion/three";
 import { useThree } from "@react-three/fiber";
 import { EffectComposer } from "@react-three/postprocessing";
@@ -99,8 +99,14 @@ const ShotView: React.FC<{ id: number; alpha: number; pen: THREE.Texture }> = ({
 
 const usePenguin = () => {
   const [pen, setPen] = useState<THREE.Texture | null>(null);
-  const [handle] = useState(() => delayRender("penguin texture"));
-  useEffect(() => { loadPenguin().then((t) => { setPen(t); continueRender(handle); }); }, [handle]);
+  // a hung image load once stalled a whole render: time out after 60 s and let Remotion retry the frame
+  const [handle] = useState(() => delayRender("penguin texture", { timeoutInMilliseconds: 60000, retries: 3 }));
+  useEffect(() => {
+    let done = false;
+    loadPenguin().then((t) => { if (!done) { done = true; setPen(t); continueRender(handle); } })
+      .catch((e) => cancelRender(e));
+    return () => { done = true; };
+  }, [handle]);
   return pen;
 };
 

@@ -80,7 +80,9 @@ const iceGeo = (seed: number) => {
 };
 
 let penTex: Promise<THREE.Texture> | null = null;
-export const loadPenguin = () => (penTex ??= new THREE.TextureLoader().loadAsync(staticFile("snow/penguin.png")).then((t) => { t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; return t; }));
+export const loadPenguin = () => (penTex ??= new THREE.TextureLoader().loadAsync(staticFile("snow/penguin.png"))
+  .then((t) => { t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; return t; })
+  .catch((e) => { penTex = null; throw e; })); // a failed load is not cached, so the retry loads again
 
 export class SnowWorld {
   root = new THREE.Group();
