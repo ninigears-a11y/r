@@ -10,7 +10,7 @@ const chromiumOptions = { gl: process.env.GL || "swangle" };
 const inputProps = { post: { dpr: Number(dpr), msaa: Number(process.env.MSAA ?? 4) } };
 fs.mkdirSync(path.dirname(out), { recursive: true });
 const serveUrl = await bundle({ entryPoint: path.resolve("src/index.ts") });
-const composition = await selectComposition({ serveUrl, id: "CanaryShort", browserExecutable, chromiumOptions, inputProps });
+const composition = await selectComposition({ serveUrl, id: process.env.COMP || "CanaryShort", browserExecutable, chromiumOptions, inputProps });
 const frameRange = range ? range.split("-").map(Number) : null;
 const t0 = Date.now(); let last = 0;
 await renderMedia({ composition, serveUrl, codec: "h264", crf: 16, outputLocation: out, inputProps, browserExecutable, chromiumOptions,
