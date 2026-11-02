@@ -1,0 +1,117 @@
+# CI + CD for the AI GIF Generator (lives in ./gif-generator).
+#
+# - Every push / PR that touches the app: lint, typecheck, unit tests, build.
+# - Every push to main that passes: production deploy to Vercel.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   VERCEL_TOKEN       – https://vercel.com/account/tokens
+#   VERCEL_ORG_ID      – "orgId" in .vercel/project.json after `vercel link`
+#   VERCEL_PROJECT_ID  – "projectId" in .vercel/project.json after `vercel link`
+# Runtime secrets such as REPLICATE_API_TOKEN live in the Vercel project settings.
+
+name: CI & Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "gif-generator/**"
+      - ".github/workflows/deploy.yml"
+  pull_request:
+    paths:
+      - "gif-generator/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint, test & build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: gif-generator
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: gif-generator/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+  deploy:
+    name: Deploy to Vercel (production)
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - name: Check Vercel secrets
+        id: secrets
+        run: |
+          if [ -z "$VERCEL_TOKEN" ] || [ -z "$VERCEL_ORG_ID" ] || [ -z "$VERCEL_PROJECT_ID" ]; then
+            echo "::warning::Vercel secrets are not configured; skipping deployment."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.secrets.outputs.ready == 'true'
+
+      - uses: actions/setup-node@v5
+        if: steps.secrets.outputs.ready == 'true'
+        with:
+          node-version: 22
+
+      - name: Install Vercel CLI
+        if: steps.secrets.outputs.ready == 'true'
+        run: npm install --global vercel@latest
+
+      # Runs from the repo root: the Vercel project's "Root Directory" setting
+      # (gif-generator) tells the CLI where the app lives.
+      - name: Pull Vercel project settings
+        if: steps.secrets.outputs.ready == 'true'
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      - name: Build
+        if: steps.secrets.outputs.ready == 'true'
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+
+      - name: Deploy
+        id: deploy
+        if: steps.secrets.outputs.ready == 'true'
+        run: |
+          url=$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "### 🚀 Deployed to $url" >> "$GITHUB_STEP_SUMMARY"
