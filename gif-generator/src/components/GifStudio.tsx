@@ -1,27 +1,68 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-
-import { DEFAULT_GIF_OPTIONS, LIMITS, type GifOptions, type Mode } from "@/lib/presets";
-import { ExploreSection, IDEAS, MyGifsSection, type GifItem, type Idea } from "./GallerySections";
-import { ImageDropzone } from "./ImageDropzone";
-import { PreviewModal } from "./PreviewModal";
-import { SettingsPanel } from "./SettingsPanel";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { deleteGif, listGifs, MAX_STORED, saveGif } from "@/lib/client/gif-store";
+import { nomeCharacter, type GifUpload } from "@/lib/client/media";
+import {
+  DEFAULT_GIF_OPTIONS,
+  LIMITS,
+  RESOLUTIONS,
+  type GifOptions,
+  type Mode,
+  type Resolution,
+  type StyleId,
+  type SwapScene,
+} from "@/lib/presets";
+import { CharacterPicker, type Character } from "./CharacterPicker";
+import { FineTune } from "./FineTune";
+import { GifDrop } from "./GifDrop";
+import { ChevronIcon } from "./icons";
+import { ModePicker } from "./ModePicker";
+import { IdeasSection, MyGifsSection, type Idea } from "./Sections";
+import { ResultActions } from "./ResultActions";
+import { Stage, type Phase } from "./Stage";
 import { StylePicker } from "./StylePicker";
 
-type Phase = "idle" | "generating" | "encoding" | "done" | "error";
-
-/** What the last GIF was made from, so it can be re-encoded with new settings for free. */
 type Source = { videoUrl: string } | { image: string } | { demo: true };
 
-const POLL_MS = 3000;
-const POLL_TIMEOUT_MS = 6 * 60 * 1000;
-const MAX_HISTORY = 12;
-
-async function errorMessage(res: Response): Promise<string> {
-  const data = await res.json().catch(() => null);
-  return data?.error ?? `Request failed (${res.status}).`;
+interface Recipe {
+  mode: Mode;
+  prompt: string;
+  style: StyleId;
+  character: Character;
+  gif: GifUpload | null;
+  scene: SwapScene;
+  options: GifOptions;
 }
+
+export interface Creation {
+  id: string;
+  url: string;
+  blob: Blob;
+  size: number;
+  fileName: string;
+  title: string;
+  mode: Mode;
+  demo: boolean;
+  createdAt: number;
+  /** Present for GIFs made in this visit: allows "Edit animation" and "Try again". */
+  source?: Source;
+  options?: GifOptions;
+  recipe?: Recipe;
+}
+
+interface Job {
+  id: string;
+  status: string;
+  output: string | null;
+  error: string | null;
+  demo?: boolean;
+  stage?: "keyframe" | "video" | "swap";
+}
+
+const POLL_MS = 3000;
+
+const MOTIONS = ["Dance happily", "Wave hello", "Jump for joy", "Fall asleep", "Spin around", "Laugh out loud"];
 
 const sleep = (ms: number, signal: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
@@ -32,385 +73,702 @@ const sleep = (ms: number, signal: AbortSignal) =>
     });
   });
 
-function slugify(text: string) {
-  return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "ai-gif";
+const slug = (s: string) =>
+  s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "nome";
+
+function characterName(c: Character) {
+  return c.kind === "nome" ? "Nome" : c.kind === "upload" ? "your character" : "";
 }
 
-const MODES: { id: Mode; label: string }[] = [
-  { id: "text", label: "Text to GIF" },
-  { id: "image", label: "Image to GIF" },
-];
-
-function Spinner({ className = "" }: { className?: string }) {
-  return (
-    <svg className={`animate-spin ${className}`} width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeOpacity="0.25" strokeWidth="1.75" />
-      <path d="M14.25 8A6.25 6.25 0 0 0 8 1.75" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
-    </svg>
-  );
+/** Output settings that reproduce a source GIF's own size and timing. */
+function optionsForGif(gif: GifUpload): GifOptions {
+  const { info } = gif;
+  const fits = [...RESOLUTIONS].reverse().find((w) => w <= info.width) ?? RESOLUTIONS[0];
+  return {
+    fps: Math.min(LIMITS.fps.max, Math.max(LIMITS.fps.min, Math.round(info.fps) || 12)),
+    width: fits as Resolution,
+    duration: Math.min(LIMITS.swapMaxSeconds, Math.max(LIMITS.outputDuration.min, Math.round(info.durationMs / 100) / 10)),
+    boomerang: false,
+    style: "none",
+  };
 }
 
-function Progress({ phase, status, elapsed, onCancel }: { phase: Phase; status: string; elapsed: number; onCancel: () => void }) {
-  const steps = [
-    { id: "generating", label: "Animating" },
-    { id: "encoding", label: "Building GIF" },
-  ];
-  const current = steps.findIndex((s) => s.id === phase);
-  return (
-    <div className="animate-fade-up rounded-xl border border-line bg-subtle p-4" role="status" aria-live="polite">
-      <div className="flex items-center justify-between gap-3">
-        <ol className="flex items-center gap-2 text-xs font-medium">
-          {steps.map((s, i) => (
-            <li key={s.id} className="flex items-center gap-2">
-              {i > 0 && <span className="h-px w-4 bg-line-strong" aria-hidden />}
-              <span className={`flex items-center gap-1.5 ${i <= current ? "text-ink" : "text-muted"}`}>
-                <span
-                  className={`flex size-4 items-center justify-center rounded-full text-[10px] ${
-                    i < current ? "bg-brand text-white" : i === current ? "bg-brand-soft text-brand ring-1 ring-brand/30" : "bg-line text-muted"
-                  }`}
-                >
-                  {i < current ? "✓" : i + 1}
-                </span>
-                {s.label}
-              </span>
-            </li>
-          ))}
-        </ol>
-        <span className="text-xs text-muted tabular-nums">{elapsed}s</span>
-      </div>
-      <div className="relative mt-3 h-1 overflow-hidden rounded-full bg-line">
-        <div className="absolute inset-y-0 w-2/5 animate-shimmer rounded-full bg-brand" />
-      </div>
-      <div className="mt-3 flex items-center justify-between gap-3">
-        <p className="text-sm text-muted">{status}</p>
-        <button type="button" onClick={onCancel} className="shrink-0 rounded-md px-2 py-1 text-sm font-medium text-muted transition-colors hover:bg-canvas hover:text-ink">
-          Cancel
-        </button>
-      </div>
-    </div>
-  );
+function stepsFor(r: Recipe): string[] {
+  if (r.mode === "swap") {
+    return ["Reading the GIF's frames", "Tracking the original character", "Re-animating it frame by frame", "Rebuilding the loop"];
+  }
+  if (r.mode === "image") return ["Uploading your character", "Bringing it to life", "Building the GIF"];
+  if (r.character.kind !== "none") return [`Drawing ${characterName(r.character)} into the scene`, "Animating the scene", "Building the GIF"];
+  return ["Imagining the scene", "Animating the scene", "Building the GIF"];
 }
 
 export function GifStudio() {
-  const [mode, setMode] = useState<Mode>("text");
-  const [textPrompt, setTextPrompt] = useState("");
-  const [motionPrompt, setMotionPrompt] = useState("");
-  const [image, setImage] = useState<string | null>(null);
-  const [options, setOptions] = useState<GifOptions>(DEFAULT_GIF_OPTIONS);
+  const [server, setServer] = useState<{ ai: boolean; sharing: boolean } | null>(null);
+
+  const [mode, setMode] = useState<Mode>("swap");
+  const [gif, setGif] = useState<GifUpload | null>(null);
+  const [upload, setUpload] = useState<Extract<Character, { kind: "upload" }> | null>(null);
+  const [characters, setCharacters] = useState<Record<Mode, Character>>({
+    swap: { kind: "nome" },
+    image: { kind: "nome" },
+    text: { kind: "none" },
+  });
+  const [scene, setScene] = useState<SwapScene>("original");
+  const [prompts, setPrompts] = useState({ image: "", text: "" });
+  const [style, setStyle] = useState<StyleId>("none");
+  const [options, setOptions] = useState<Record<Mode, GifOptions>>({
+    swap: { ...DEFAULT_GIF_OPTIONS, style: "none" },
+    image: { ...DEFAULT_GIF_OPTIONS, style: "none" },
+    text: { ...DEFAULT_GIF_OPTIONS, style: "none" },
+  });
+
   const [phase, setPhase] = useState<Phase>("idle");
-  const [status, setStatus] = useState("");
+  const [steps, setSteps] = useState<string[]>([]);
+  const [step, setStep] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [demo, setDemo] = useState(false);
-  const [source, setSource] = useState<Source | null>(null);
-  const [gifs, setGifs] = useState<GifItem[]>([]);
-  const [previewId, setPreviewId] = useState<string | null>(null);
+  const [current, setCurrent] = useState<Creation | null>(null);
+  const [meta, setMeta] = useState<{ w: number; h: number } | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [editOptions, setEditOptions] = useState<GifOptions>(DEFAULT_GIF_OPTIONS);
+  const [gallery, setGallery] = useState<Creation[]>([]);
+  const [toast, setToast] = useState<{ id: number; text: string } | null>(null);
+
   const abortRef = useRef<AbortController | null>(null);
   const startedRef = useRef(0);
-  const gifsRef = useRef<GifItem[]>([]);
+  const galleryRef = useRef<Creation[]>([]);
+  const stageRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
 
-  const prompt = mode === "text" ? textPrompt : motionPrompt;
-  const setPrompt = mode === "text" ? setTextPrompt : setMotionPrompt;
-  const busy = phase === "generating" || phase === "encoding";
-  const canSubmit = !busy && (mode === "text" ? textPrompt.trim().length >= 3 : Boolean(image));
-  const preview = gifs.find((g) => g.id === previewId) ?? null;
+  const busy = phase === "busy";
+  const character = characters[mode];
+  const prompt = mode === "text" ? prompts.text : prompts.image;
 
-  // Free every blob URL when the studio unmounts.
-  useEffect(() => () => gifsRef.current.forEach((g) => URL.revokeObjectURL(g.url)), []);
+  // ── Boot: server capabilities + saved GIFs ─────────────────────────
+  useEffect(() => {
+    fetch("/api/status")
+      .then((r) => r.json())
+      .then((s: { ai: boolean; sharing: boolean }) => setServer(s))
+      .catch(() => setServer({ ai: false, sharing: false }));
 
-  // Tick the elapsed-time counter while a job runs.
+    let live = true;
+    void listGifs().then((stored) => {
+      if (!live) return;
+      const restored: Creation[] = stored.map((g) => ({ ...g, size: g.blob.size, url: URL.createObjectURL(g.blob) }));
+      setGallery((prev) => [...prev, ...restored.filter((r) => !prev.some((p) => p.id === r.id))]);
+    });
+    return () => {
+      live = false;
+      abortRef.current?.abort();
+      galleryRef.current.forEach((g) => URL.revokeObjectURL(g.url));
+    };
+  }, []);
+
+  useEffect(() => {
+    galleryRef.current = gallery;
+  }, [gallery]);
+
   useEffect(() => {
     if (!busy) return;
     const t = setInterval(() => setElapsed(Math.round((Date.now() - startedRef.current) / 1000)), 1000);
     return () => clearInterval(t);
   }, [busy]);
 
-  const set = <K extends keyof GifOptions>(key: K, value: GifOptions[K]) =>
-    setOptions((o) => ({ ...o, [key]: value }));
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4200);
+    return () => clearTimeout(t);
+  }, [toast]);
 
-  function addGif(item: GifItem) {
-    const next = [item, ...gifsRef.current];
-    next.slice(MAX_HISTORY).forEach((g) => URL.revokeObjectURL(g.url));
-    gifsRef.current = next.slice(0, MAX_HISTORY);
-    setGifs(gifsRef.current);
-  }
+  const notify = useCallback((text: string) => setToast({ id: Date.now(), text }), []);
 
-  async function encode(src: Source, signal: AbortSignal) {
-    setPhase("encoding");
-    setStatus("Stitching frames into a looping GIF…");
-    const res = await fetch("/api/gif", {
+  // ── Pipeline helpers ────────────────────────────────────────────────
+  async function post(body: Record<string, unknown>, signal: AbortSignal): Promise<Job> {
+    const res = await fetch("/api/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...options, ...("demo" in src ? {} : src) }),
+      body: JSON.stringify(body),
       signal,
     });
-    if (!res.ok) throw new Error(await errorMessage(res));
-    const blob = await res.blob();
-    const id = crypto.randomUUID();
-    addGif({
-      id,
-      url: URL.createObjectURL(blob),
-      size: blob.size,
-      fileName: `${slugify(prompt || "animated-photo")}.gif`,
-      prompt: prompt.trim(),
-    });
-    setPhase("done");
-    setStatus("");
-    setPreviewId(id);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error ?? "Could not start the AI model.");
+    return data as Job;
   }
 
-  async function run(task: (signal: AbortSignal) => Promise<void>) {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    startedRef.current = Date.now();
-    setElapsed(0);
-    setError(null);
-    try {
-      await task(controller.signal);
-    } catch (err) {
-      if ((err as Error).name === "AbortError") {
-        setPhase("idle");
-        setStatus("");
-        return;
+  async function poll(id: string, signal: AbortSignal, onStatus?: (status: string) => void): Promise<string> {
+    for (;;) {
+      const res = await fetch(`/api/generate/${id}`, { signal, cache: "no-store" });
+      const job = (await res.json().catch(() => ({}))) as Partial<Job>;
+      if (!res.ok) throw new Error(job.error ?? "Lost track of the AI job.");
+      onStatus?.(job.status ?? "");
+      if (job.status === "succeeded") {
+        if (!job.output) throw new Error("The model finished without an output.");
+        return job.output;
       }
-      setError((err as Error).message);
-      setPhase("error");
+      if (job.status === "failed" || job.status === "canceled") {
+        throw new Error(job.error ? `The AI model failed: ${job.error}` : "The AI model failed. Please try again.");
+      }
+      await sleep(POLL_MS, signal);
     }
   }
 
-  const generate = () =>
-    run(async (signal) => {
-      setPhase("generating");
-      setStatus("Sending your idea to the AI model…");
-      const res = await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, prompt, style: options.style, image: mode === "image" ? image : undefined }),
-        signal,
-      });
-      if (!res.ok) throw new Error(await errorMessage(res));
-      let job = await res.json();
-      setDemo(Boolean(job.demo));
-
-      if (job.demo) {
-        const src: Source = mode === "image" && image ? { image } : { demo: true };
-        setSource(src);
-        return encode(src, signal);
-      }
-
-      const started = Date.now();
-      while (job.status !== "succeeded") {
-        if (job.status === "failed" || job.status === "canceled") {
-          throw new Error(job.error ?? "Generation failed.");
-        }
-        if (Date.now() - started > POLL_TIMEOUT_MS) throw new Error("Generation timed out.");
-        setStatus(job.status === "starting" ? "Warming up the AI model…" : "AI is animating your idea…");
-        await sleep(POLL_MS, signal);
-        const poll = await fetch(`/api/generate/${job.id}`, { signal, cache: "no-store" });
-        if (!poll.ok) throw new Error(await errorMessage(poll));
-        job = await poll.json();
-      }
-      if (!job.output) throw new Error("The model returned no video.");
-      const src: Source = { videoUrl: job.output };
-      setSource(src);
-      await encode(src, signal);
+  async function encode(source: Source, opts: GifOptions, signal: AbortSignal): Promise<Blob> {
+    const res = await fetch("/api/gif", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...source, ...opts }),
+      signal,
     });
-
-  const reencode = () => source && run((signal) => encode(source, signal));
-
-  function applyIdea(idea: Idea) {
-    setMode("text");
-    setTextPrompt(idea.prompt);
-    set("style", idea.style);
-    document.getElementById("create")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    setTimeout(() => promptRef.current?.focus({ preventScroll: true }), 400);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? "Could not build the GIF.");
+    return res.blob();
   }
 
-  const modeIndex = MODES.findIndex((m) => m.id === mode);
+  function addCreation(c: Omit<Creation, "id" | "url" | "size" | "createdAt">) {
+    const creation: Creation = { ...c, id: crypto.randomUUID(), url: URL.createObjectURL(c.blob), size: c.blob.size, createdAt: Date.now() };
+    setCurrent(creation);
+    setMeta(null);
+    setGallery((prev) => {
+      const next = [creation, ...prev];
+      next.slice(MAX_STORED).forEach((g) => URL.revokeObjectURL(g.url));
+      return next.slice(0, MAX_STORED);
+    });
+    void saveGif({
+      id: creation.id,
+      blob: creation.blob,
+      title: creation.title,
+      mode: creation.mode,
+      fileName: creation.fileName,
+      createdAt: creation.createdAt,
+      demo: creation.demo,
+    });
+    return creation;
+  }
+
+  /** On stacked (mobile/tablet) layouts, bring Nome's screen into view. */
+  function revealStage() {
+    const stacked = window.matchMedia("(max-width: 1023px)").matches;
+    stageRef.current?.scrollIntoView({ behavior: "smooth", block: stacked ? "start" : "nearest" });
+  }
+
+  function begin(stepLabels: string[]) {
+    abortRef.current?.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    startedRef.current = Date.now();
+    setElapsed(0);
+    setSteps(stepLabels);
+    setStep(0);
+    setError(null);
+    setEditing(false);
+    setPhase("busy");
+    return ctrl.signal;
+  }
+
+  function fail(err: unknown) {
+    if ((err as Error).name === "AbortError") {
+      setPhase(current ? "done" : "idle");
+      return;
+    }
+    setError(err instanceof Error ? err.message : "Something went wrong.");
+    setPhase("error");
+  }
+
+  // ── Generate ─────────────────────────────────────────────────────────
+  async function run(recipe: Recipe) {
+    const signal = begin(stepsFor(recipe));
+    revealStage();
+    try {
+      const char =
+        recipe.character.kind === "nome"
+          ? await nomeCharacter()
+          : recipe.character.kind === "upload"
+            ? recipe.character.dataUrl
+            : null;
+      let source: Source;
+      let demo = false;
+
+      if (recipe.mode === "swap") {
+        if (!recipe.gif || !char) throw new Error("Add a GIF and a character first.");
+        const job = await post({ mode: "swap", gif: recipe.gif.dataUrl, character: char, scene: recipe.scene }, signal);
+        setStep(1);
+        const video = await poll(job.id, signal, (s) => s === "processing" && setStep(2));
+        source = { videoUrl: video };
+        setStep(3);
+      } else if (recipe.mode === "image") {
+        if (!char) throw new Error("Choose a character to animate.");
+        const job = await post({ mode: "image", prompt: recipe.prompt, style: recipe.style, image: char }, signal);
+        if (job.demo) {
+          demo = true;
+          source = { image: char };
+        } else {
+          setStep(1);
+          source = { videoUrl: await poll(job.id, signal) };
+        }
+        setStep(2);
+      } else {
+        const job = await post(
+          { mode: "text", prompt: recipe.prompt, style: recipe.style, character: char ?? undefined },
+          signal,
+        );
+        if (job.demo) {
+          demo = true;
+          source = char ? { image: char } : { demo: true };
+        } else if (job.stage === "keyframe") {
+          const keyframe = await poll(job.id, signal);
+          setStep(1);
+          const video = await post({ mode: "image", prompt: recipe.prompt, style: recipe.style, imageUrl: keyframe }, signal);
+          source = { videoUrl: await poll(video.id, signal) };
+        } else {
+          setStep(1);
+          source = { videoUrl: await poll(job.id, signal) };
+        }
+        setStep(2);
+      }
+
+      // Style presets also steer how FFmpeg scales and dithers the GIF.
+      const opts: GifOptions = { ...recipe.options, style: recipe.mode === "swap" ? "none" : recipe.style };
+      const blob = await encode(source, opts, signal);
+      const title =
+        recipe.mode === "swap"
+          ? `${characterName(recipe.character) === "Nome" ? "Nome" : "Your character"} in ${recipe.gif?.name.replace(/\.gif$/i, "")}`
+          : recipe.prompt || "Animated character";
+      addCreation({
+        blob,
+        title,
+        fileName: `${slug(title)}.gif`,
+        mode: recipe.mode,
+        demo,
+        source,
+        options: opts,
+        recipe,
+      });
+      setPhase("done");
+    } catch (err) {
+      fail(err);
+    }
+  }
+
+  async function reencode() {
+    if (!current?.source) return;
+    const base = current;
+    const signal = begin(["Rebuilding the GIF"]);
+    try {
+      const blob = await encode(base.source!, editOptions, signal);
+      addCreation({ ...base, blob, options: editOptions });
+      setPhase("done");
+    } catch (err) {
+      fail(err);
+    }
+  }
+
+  const recipe: Recipe = { mode, prompt: prompt.trim(), style, character, gif, scene, options: options[mode] };
+  const needsAi = mode === "swap" && server?.ai === false;
+  const ready =
+    !busy &&
+    !needsAi &&
+    (mode === "swap" ? Boolean(gif) && character.kind !== "none" : mode === "image" ? character.kind !== "none" : prompt.trim().length >= 3);
+
+  const cta =
+    mode === "swap"
+      ? `Swap in ${character.kind === "nome" ? "Nome" : "my character"}`
+      : mode === "image"
+        ? `Animate ${character.kind === "nome" ? "Nome" : "my character"}`
+        : "Generate GIF";
+
+  const missing =
+    mode === "swap"
+      ? !gif
+        ? "Add a GIF to start"
+        : null
+      : mode === "text" && prompt.trim().length < 3
+        ? "Describe your animation"
+        : null;
+
+  const idleHint =
+    mode === "swap"
+      ? "Give me a GIF and a character. I'll keep every move and swap the star."
+      : mode === "image"
+        ? "Pick a character and tell me how it should move."
+        : "Describe a scene. Add a character if you want them to star in it.";
+
+  function setPrompt(value: string) {
+    setPrompts((p) => (mode === "text" ? { ...p, text: value } : { ...p, image: value }));
+  }
+
+  function chooseGif(next: GifUpload | null) {
+    setGif(next);
+    if (next) setOptions((o) => ({ ...o, swap: optionsForGif(next) }));
+  }
+
+  function applyIdea(idea: Idea) {
+    setMode(idea.mode);
+    setPrompts((p) => ({ ...p, [idea.mode === "text" ? "text" : "image"]: idea.prompt }));
+    setCharacters((c) => ({ ...c, [idea.mode]: idea.withNome ? { kind: "nome" } : { kind: "none" } }));
+    if (idea.style) setStyle(idea.style);
+    document.getElementById("create")?.scrollIntoView({ behavior: "smooth" });
+    setTimeout(() => promptRef.current?.focus({ preventScroll: true }), 500);
+  }
+
+  function openCreation(id: string) {
+    const found = gallery.find((g) => g.id === id);
+    if (!found) return;
+    setCurrent(found);
+    setMeta(null);
+    setEditing(false);
+    setError(null);
+    setPhase("done");
+    revealStage();
+  }
+
+  function removeCreation(id: string) {
+    setGallery((prev) => {
+      const gone = prev.find((g) => g.id === id);
+      if (gone && gone.id !== current?.id) URL.revokeObjectURL(gone.url);
+      return prev.filter((g) => g.id !== id);
+    });
+    void deleteGif(id);
+  }
+
+  const fineDuration = mode === "swap";
+  const maxDuration = mode === "swap" && gif ? optionsForGif(gif).duration : LIMITS.duration.max;
 
   return (
     <>
-      <section id="create" aria-label="GIF generator" className="mx-auto max-w-6xl scroll-mt-20 px-4 sm:px-6">
-        <div className="grid animate-fade-up items-start gap-4 [animation-delay:180ms] lg:grid-cols-[minmax(0,1fr)_340px] lg:gap-5">
-          {/* ── Workspace ─────────────────────────────── */}
-          <div className="rounded-2xl border border-line bg-canvas p-4 shadow-card sm:p-6">
-            {/* Segmented control */}
-            <div role="tablist" aria-label="Generation mode" className="relative grid grid-cols-2 rounded-xl bg-subtle p-1 ring-1 ring-line ring-inset sm:inline-grid sm:w-80">
-              <span
-                aria-hidden
-                className="absolute inset-y-1 left-1 w-[calc(50%-4px)] rounded-lg bg-canvas shadow-card ring-1 ring-line transition-transform duration-300 ease-[cubic-bezier(.2,.8,.2,1)]"
-                style={{ transform: `translateX(${modeIndex * 100}%)` }}
-              />
-              {MODES.map((m) => (
-                <button
-                  key={m.id}
-                  role="tab"
-                  id={`tab-${m.id}`}
-                  aria-selected={mode === m.id}
-                  aria-controls="mode-panel"
-                  onClick={() => setMode(m.id)}
-                  disabled={busy}
-                  className={`relative z-10 rounded-lg px-3 py-2 text-sm font-medium transition-colors duration-200 focus-visible:outline-2 focus-visible:outline-brand ${
-                    mode === m.id ? "text-ink" : "text-muted hover:text-ink"
-                  }`}
-                >
-                  {m.label}
-                </button>
-              ))}
-            </div>
+      <section id="create" className="mx-auto max-w-6xl scroll-mt-20 px-4 sm:px-6">
+        <div className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold text-brand">The studio</p>
+            <h2 className="mt-1 font-display text-3xl font-bold tracking-[-0.03em] sm:text-4xl">What are we making?</h2>
+          </div>
+          {server && !server.ai && (
+            <p className="max-w-md rounded-xl border border-line bg-warning-soft px-3.5 py-2.5 text-xs leading-relaxed text-[#7a5200]">
+              <strong className="font-semibold">Demo mode.</strong> This server has no{" "}
+              <code className="font-mono">REPLICATE_API_TOKEN</code>, so AI is off. Image and text modes make a local
+              preview animation instead; GIF swaps need the AI.
+            </p>
+          )}
+        </div>
 
-            <div id="mode-panel" role="tabpanel" aria-labelledby={`tab-${mode}`} className="mt-6 space-y-6">
-              {mode === "image" && (
-                <div key="image" className="animate-fade-up">
-                  <ImageDropzone value={image} onChange={setImage} disabled={busy} />
-                </div>
-              )}
+        <ModePicker value={mode} onChange={(m) => !busy && setMode(m)} disabled={busy} />
 
-              <div key={mode} className="animate-fade-up">
-                <div className="flex items-baseline justify-between">
-                  <label htmlFor="prompt" className="text-sm font-medium text-ink">
-                    {mode === "text" ? "Describe your GIF" : "Describe the motion"}
-                    {mode === "image" && <span className="ml-1.5 font-normal text-muted">Optional</span>}
-                  </label>
-                  <span className="text-xs text-muted tabular-nums">
-                    {prompt.length}/{LIMITS.promptMaxLength}
-                  </span>
-                </div>
-                <textarea
-                  ref={promptRef}
-                  id="prompt"
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && canSubmit) void generate();
-                  }}
-                  maxLength={LIMITS.promptMaxLength}
-                  rows={mode === "text" ? 4 : 2}
-                  disabled={busy}
-                  placeholder={mode === "text" ? "A pixel art cat dancing in space…" : "Hair blowing gently in the wind…"}
-                  className="mt-2 w-full resize-none rounded-xl border border-line bg-canvas px-4 py-3 text-base leading-relaxed text-ink shadow-card transition-[border-color,box-shadow] duration-150 placeholder:text-[#a3a3a3] hover:border-line-strong focus:border-brand focus:ring-4 focus:ring-brand/10 focus:outline-none disabled:bg-subtle disabled:text-muted"
-                />
-                {mode === "text" && (
-                  <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <span className="text-xs text-muted">Try:</span>
-                    {IDEAS.slice(0, 3).map((idea) => (
+        <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.92fr)] lg:gap-8">
+          {/* ── Inputs ─────────────────────────────────────────── */}
+          <div key={mode} id="mode-panel" role="tabpanel" aria-labelledby={`mode-${mode}`} className="animate-fade-up space-y-7 rounded-[28px] border border-line bg-canvas p-5 shadow-card sm:p-7">
+            {mode === "swap" && (
+              <>
+                <Field n={1} title="The original GIF" hint="The motion, timing and scene come from here.">
+                  <GifDrop value={gif} onChange={chooseGif} disabled={busy} />
+                </Field>
+                <Field n={2} title="Who should star in it?" hint="Full-body characters with clear arms and legs work best.">
+                  <CharacterPicker
+                    label="Character"
+                    value={character}
+                    onChange={(c) => setCharacters((s) => ({ ...s, swap: c }))}
+                    upload={upload}
+                    onUpload={setUpload}
+                    disabled={busy}
+                  />
+                </Field>
+                <Field n={3} title="Scene">
+                  <div role="radiogroup" aria-label="Scene" className="grid gap-2 sm:grid-cols-2">
+                    {(
+                      [
+                        ["original", "Keep the GIF's scene", "Replace the character, keep the background and lighting."],
+                        ["character", "Use my character's image", "Your character performs the moves in its own picture."],
+                      ] as const
+                    ).map(([id, title, body]) => (
                       <button
-                        key={idea.prompt}
+                        key={id}
                         type="button"
-                        onClick={() => {
-                          setTextPrompt(idea.prompt);
-                          promptRef.current?.focus();
-                        }}
+                        role="radio"
+                        aria-checked={scene === id}
+                        onClick={() => setScene(id)}
                         disabled={busy}
-                        className="rounded-full border border-line bg-canvas px-3 py-1 text-xs text-muted transition-colors hover:border-brand/40 hover:bg-brand-soft/50 hover:text-brand-hover disabled:opacity-50"
+                        className={`rounded-2xl border p-3.5 text-left transition-all ${scene === id ? "border-ink shadow-[0_0_0_1px_var(--color-ink)]" : "border-line hover:border-line-strong hover:bg-subtle"}`}
                       >
-                        {idea.prompt}
+                        <span className="block text-sm font-semibold">{title}</span>
+                        <span className="mt-1 block text-xs leading-relaxed text-muted">{body}</span>
                       </button>
                     ))}
                   </div>
-                )}
-              </div>
+                </Field>
+              </>
+            )}
 
-              <StylePicker value={options.style} onChange={(s) => set("style", s)} disabled={busy} />
-            </div>
+            {mode === "image" && (
+              <>
+                <Field n={1} title="Your character" hint="A clear picture of one character on a simple background.">
+                  <CharacterPicker
+                    label="Character"
+                    value={character}
+                    onChange={(c) => setCharacters((s) => ({ ...s, image: c }))}
+                    upload={upload}
+                    onUpload={setUpload}
+                    disabled={busy}
+                  />
+                </Field>
+                <Field n={2} title="What should they do?" optional>
+                  <PromptBox
+                    ref={promptRef}
+                    value={prompts.image}
+                    onChange={setPrompt}
+                    rows={2}
+                    placeholder="Dance happily, waving both arms…"
+                    disabled={busy}
+                    onSubmit={() => ready && void run(recipe)}
+                  />
+                  <Chips items={MOTIONS} onPick={(m) => setPrompt(m)} disabled={busy} />
+                </Field>
+                <Field n={3} title="Style">
+                  <StylePicker value={style} onChange={setStyle} disabled={busy} />
+                </Field>
+              </>
+            )}
 
-            {/* Action row */}
-            <div className="mt-6 flex flex-col gap-3 border-t border-line pt-5 sm:flex-row sm:items-center sm:justify-between">
-              <p className="hidden text-xs text-muted sm:block">
-                {mode === "image" && !image ? (
-                  "Upload an image to get started."
-                ) : (
-                  <>
-                    Press <kbd className="rounded border border-line bg-subtle px-1 font-sans">⌘</kbd>{" "}
-                    <kbd className="rounded border border-line bg-subtle px-1 font-sans">Enter</kbd> to generate
-                  </>
-                )}
-              </p>
-              <div className="flex flex-col-reverse gap-2 sm:flex-row">
-                {preview === null && gifs.length > 0 && !busy && (
-                  <button
-                    type="button"
-                    onClick={() => setPreviewId(gifs[0].id)}
-                    className="rounded-xl border border-line bg-canvas px-4 py-2.5 text-sm font-medium text-ink transition-colors hover:border-line-strong hover:bg-subtle"
-                  >
-                    View last GIF
+            {mode === "text" && (
+              <>
+                <Field n={1} title="Describe the animation">
+                  <PromptBox
+                    ref={promptRef}
+                    value={prompts.text}
+                    onChange={setPrompt}
+                    rows={3}
+                    placeholder={character.kind === "none" ? "Paper boats drifting down a rainy street…" : "Dancing happily in outer space…"}
+                    disabled={busy}
+                    onSubmit={() => ready && void run(recipe)}
+                  />
+                </Field>
+                <Field n={2} title="Featuring" optional hint="Add a character and it will star in your scene.">
+                  <CharacterPicker
+                    label="Featured character"
+                    allowNone
+                    value={character}
+                    onChange={(c) => setCharacters((s) => ({ ...s, text: c }))}
+                    upload={upload}
+                    onUpload={setUpload}
+                    disabled={busy}
+                  />
+                </Field>
+                <Field n={3} title="Style">
+                  <StylePicker value={style} onChange={setStyle} disabled={busy} />
+                </Field>
+              </>
+            )}
+
+            <details className="group rounded-2xl border border-line">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-2xl px-4 py-3 text-sm font-medium transition-colors hover:bg-subtle">
+                <span>
+                  Fine-tune
+                  <span className="ml-2 font-normal text-muted">
+                    {options[mode].fps} fps · {options[mode].duration.toFixed(fineDuration ? 1 : 0)}s · {options[mode].width}px
+                    {options[mode].boomerang ? " · boomerang" : ""}
+                  </span>
+                </span>
+                <ChevronIcon className="size-4 text-muted transition-transform group-open:rotate-180" />
+              </summary>
+              <div className="border-t border-line px-4 py-5">
+                <FineTune
+                  options={options[mode]}
+                  onChange={(o) => setOptions((s) => ({ ...s, [mode]: o }))}
+                  disabled={busy}
+                  fineDuration={fineDuration}
+                  maxDuration={maxDuration}
+                />
+                {mode === "swap" && gif && (
+                  <button type="button" onClick={() => chooseGif(gif)} className="mt-4 text-xs font-medium text-muted underline-offset-4 hover:text-ink hover:underline">
+                    Match the original GIF again
                   </button>
                 )}
-                <button
-                  type="button"
-                  onClick={() => void generate()}
-                  disabled={!canSubmit}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-brand px-6 py-2.5 text-sm font-medium text-white shadow-brand transition-all duration-150 hover:bg-brand-hover active:scale-[0.98] disabled:cursor-not-allowed disabled:bg-[#c9bdfb] disabled:shadow-none"
-                >
-                  {busy ? (
-                    <>
-                      <Spinner />
-                      Generating…
-                    </>
-                  ) : (
-                    <>
-                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                        <path d="M8 1.5 9.4 6.1 14 7.5 9.4 8.9 8 13.5 6.6 8.9 2 7.5l4.6-1.4L8 1.5Z" fill="currentColor" />
-                      </svg>
-                      Generate GIF
-                    </>
-                  )}
-                </button>
               </div>
-            </div>
+            </details>
 
-            {/* Status */}
-            <div className="empty:hidden mt-4 space-y-3">
-              {busy && <Progress phase={phase} status={status} elapsed={elapsed} onCancel={() => abortRef.current?.abort()} />}
-              {error && (
-                <div role="alert" className="flex animate-fade-up items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-                  <span aria-hidden>⚠</span>
-                  <span>{error}</span>
-                </div>
-              )}
-              {demo && phase === "done" && (
-                <p className="animate-fade-up rounded-xl border border-amber-200/70 bg-warning-soft px-4 py-3 text-sm text-amber-800">
-                  <strong className="font-medium">Demo mode.</strong> No <code className="font-mono text-xs">REPLICATE_API_TOKEN</code> is set, so
-                  this GIF was made locally {source && "image" in source ? "by animating your photo" : "from a procedural animation"}.
-                </p>
-              )}
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-xs text-muted">
+                {needsAi
+                  ? "GIF swaps need the AI model — add a Replicate token on the server."
+                  : missing ?? (mode === "swap" ? "Takes about 1–3 minutes." : "Takes about a minute.")}
+              </p>
+              <button
+                type="button"
+                onClick={() => void run(recipe)}
+                disabled={!ready}
+                className="group inline-flex items-center justify-center gap-2 rounded-full bg-ink px-6 py-3.5 text-[15px] font-semibold text-white shadow-ink transition-all hover:-translate-y-0.5 hover:bg-black active:translate-y-0 active:scale-[0.98] disabled:translate-y-0 disabled:cursor-not-allowed disabled:bg-line-strong disabled:text-white disabled:shadow-none"
+              >
+                {busy ? (
+                  <>
+                    <span className="animate-spin-slow size-4 rounded-full border-2 border-white/30 border-t-white" aria-hidden />
+                    Working…
+                  </>
+                ) : (
+                  <>
+                    {cta}
+                    <span className="transition-transform group-hover:translate-x-0.5" aria-hidden>→</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
 
-          {/* ── Settings ──────────────────────────────── */}
-          <SettingsPanel
-            options={options}
-            onChange={set}
-            onReset={() => setOptions((o) => ({ ...DEFAULT_GIF_OPTIONS, style: o.style }))}
-            onRerender={source ? () => void reencode() : undefined}
-            disabled={busy}
-          />
+          {/* ── Output ─────────────────────────────────────────── */}
+          <div ref={stageRef} className="scroll-mt-24 lg:sticky lg:top-24 lg:self-start">
+            <Stage
+              phase={phase}
+              steps={steps}
+              step={step}
+              elapsed={elapsed}
+              idleHint={idleHint}
+              error={error}
+              result={current}
+              meta={meta}
+              onMeta={setMeta}
+              onCancel={() => abortRef.current?.abort()}
+            />
+            {phase === "done" && current && (
+              <div className="mt-4 animate-fade-up">
+                <p className="mb-3 truncate px-1 text-sm font-medium" title={current.title}>{current.title}</p>
+                <ResultActions
+                  gif={current}
+                  sharing={Boolean(server?.sharing)}
+                  onToast={notify}
+                  onTryAgain={current.recipe ? () => void run(current.recipe!) : undefined}
+                  onEdit={
+                    current.source
+                      ? () => {
+                          setEditOptions(current.options ?? DEFAULT_GIF_OPTIONS);
+                          setEditing((e) => !e);
+                        }
+                      : undefined
+                  }
+                  editing={editing}
+                />
+                {editing && current.source && (
+                  <div className="mt-3 animate-fade-up rounded-2xl border border-line bg-canvas p-4 shadow-card">
+                    <FineTune
+                      options={editOptions}
+                      onChange={setEditOptions}
+                      fineDuration={current.mode === "swap"}
+                      maxDuration={current.recipe?.gif ? optionsForGif(current.recipe.gif).duration : LIMITS.duration.max}
+                    />
+                    <div className="mt-5 flex items-center justify-between gap-3">
+                      <p className="text-xs text-muted">Re-builds the GIF from the same animation — no AI wait.</p>
+                      <button type="button" onClick={() => void reencode()} className="shrink-0 rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white transition hover:bg-black">
+                        Update GIF
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            {phase === "error" && (
+              <div className="mt-4 flex justify-center">
+                <button type="button" onClick={() => void run(recipe)} disabled={!ready} className="rounded-full border border-line px-4 py-2 text-sm font-medium transition hover:bg-subtle disabled:opacity-50">
+                  Try again
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </section>
 
-      <ExploreSection onUse={applyIdea} />
-      <MyGifsSection gifs={gifs} onOpen={setPreviewId} />
+      <MyGifsSection gifs={gallery} activeId={current?.id ?? null} onOpen={openCreation} onDelete={removeCreation} />
+      <IdeasSection onUse={applyIdea} />
 
-      {preview && (
-        <PreviewModal
-          key={preview.id}
-          gifUrl={preview.url}
-          sizeBytes={preview.size}
-          fileName={preview.fileName}
-          prompt={preview.prompt}
-          onClose={() => setPreviewId(null)}
-          onTryAgain={
-            canSubmit
-              ? () => {
-                  setPreviewId(null);
-                  void generate();
-                }
-              : undefined
-          }
-        />
+      {toast && (
+        <div key={toast.id} role="status" className="fixed inset-x-4 bottom-5 z-50 mx-auto w-fit max-w-[calc(100vw-32px)] animate-fade-up rounded-full bg-ink px-4 py-2.5 text-center text-sm font-medium text-white shadow-float">
+          {toast.text}
+        </div>
       )}
     </>
+  );
+}
+
+function Field({
+  n,
+  title,
+  hint,
+  optional,
+  children,
+}: {
+  n: number;
+  title: string;
+  hint?: string;
+  optional?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <div className="mb-3 flex items-start gap-3">
+        <span className="mt-px flex size-6 shrink-0 items-center justify-center rounded-full bg-ink text-xs font-semibold text-white">{n}</span>
+        <div>
+          <h3 className="font-semibold">
+            {title}
+            {optional && <span className="ml-2 text-xs font-normal text-muted">Optional</span>}
+          </h3>
+          {hint && <p className="mt-0.5 text-sm text-muted">{hint}</p>}
+        </div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function PromptBox({
+  ref,
+  value,
+  onChange,
+  rows,
+  placeholder,
+  disabled,
+  onSubmit,
+}: {
+  ref: React.Ref<HTMLTextAreaElement>;
+  value: string;
+  onChange: (v: string) => void;
+  rows: number;
+  placeholder: string;
+  disabled?: boolean;
+  onSubmit: () => void;
+}) {
+  return (
+    <div className="relative">
+      <textarea
+        ref={ref}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            onSubmit();
+          }
+        }}
+        rows={rows}
+        maxLength={LIMITS.promptMaxLength}
+        placeholder={placeholder}
+        disabled={disabled}
+        aria-label="Prompt"
+        className="w-full resize-none rounded-2xl border border-line bg-subtle px-4 pt-3.5 pb-7 text-[15px] leading-relaxed placeholder:text-muted/70 transition focus:border-ink/40 focus:bg-canvas focus:ring-4 focus:ring-brand/10 focus:outline-none disabled:opacity-60"
+      />
+      <span className="pointer-events-none absolute right-3.5 bottom-2.5 text-[11px] text-muted tabular-nums">
+        {value.length}/{LIMITS.promptMaxLength}
+      </span>
+    </div>
+  );
+}
+
+function Chips({ items, onPick, disabled }: { items: string[]; onPick: (v: string) => void; disabled?: boolean }) {
+  return (
+    <div className="mt-3 flex flex-wrap gap-1.5">
+      {items.map((item) => (
+        <button
+          key={item}
+          type="button"
+          onClick={() => onPick(item)}
+          disabled={disabled}
+          className="rounded-full border border-line bg-canvas px-3 py-1.5 text-xs font-medium text-muted transition-all hover:-translate-y-px hover:border-line-strong hover:text-ink disabled:opacity-50"
+        >
+          {item}
+        </button>
+      ))}
+    </div>
   );
 }

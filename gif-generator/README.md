@@ -1,11 +1,16 @@
-# 🎞️ AI GIF Generator
+# Nome Studio — AI character animation
 
-An open-source web app that turns **text prompts** and **still photos** into lightweight, looping GIFs.
+An open-source studio for animated GIFs, fronted by our mascot **Nome**. Three workflows:
 
-- **Text → GIF**: a prompt + style preset is sent to an AI text-to-video model on [Replicate](https://replicate.com).
-- **Image → GIF**: a photo is animated by an image-to-video model.
-- **FFmpeg** then turns the video into an optimised GIF (two-pass palette, style-aware dithering, infinite loop, optional boomerang).
-- **Demo mode**: with no API token the whole app still works. Photos get a seamless looping zoom and text prompts get a procedural animation, so you can develop and run CI for free.
+| Mode | You give it | What happens | Replicate model (default) |
+| --- | --- | --- | --- |
+| **GIF → Character** (signature) | an animated GIF + a character image | The character in the GIF is replaced, frame by frame, by your character. Motion, timing and scene are kept. | `wan-video/wan-2.2-animate-replace` (keep the GIF's scene) or `wan-video/wan-2.2-animate-animation` (use the character image's scene) |
+| **Image → GIF** | a character image + optional motion prompt | The character is animated (dance, wave, jump…). | `wan-video/wan-2.2-i2v-fast` |
+| **Text → GIF** | a prompt, optionally a character image | Without a character: text-to-video. With one: a first frame featuring that character is drawn, then animated. | `wan-video/wan-2.2-t2v-fast`, or `google/nano-banana` → `wan-video/wan-2.2-i2v-fast` |
+
+Every result is rebuilt by **FFmpeg** into an optimised, infinitely looping GIF (two-pass palette, style-aware dithering, optional boomerang). Results can be downloaded as **GIF** or **MP4**, copied, shared (Web Share API on phones, optional hosted links), tweaked without re-running the AI ("Edit animation"), or regenerated ("Try again"). "My GIFs" is kept in the browser (IndexedDB).
+
+**Demo mode:** with no `REPLICATE_API_TOKEN`, Image → GIF and Text → GIF produce a clearly labelled *local* preview animation (no AI), so the UI and CI work for free. GIF → Character has no honest offline fallback, so it is disabled and says why.
 
 Stack: Next.js 16 (App Router, Route Handlers) · React 19 · Tailwind CSS 4 · Replicate HTTP API · FFmpeg (`ffmpeg-static`) · Vitest · GitHub Actions → Vercel.
 
@@ -18,41 +23,59 @@ Stack: Next.js 16 (App Router, Route Handlers) · React 19 · Tailwind CSS 4 · 
 ├── .github/workflows/deploy.yml     # CI (lint/typecheck/test/build) + Vercel deploy on main
 └── gif-generator/
     ├── .env.example                 # REPLICATE_API_TOKEN + optional model overrides
-    ├── next.config.ts               # ships the FFmpeg binary with the /api/gif function
-    ├── vercel.json                  # disables Vercel's own git deploys (Actions deploys instead)
-    ├── vitest.config.ts
+    ├── next.config.ts               # ships the FFmpeg binary with the functions that use it
+    ├── public/nome/                 # Nome artwork (cut-out body, "!!" marks, reference sheet)
     └── src/
         ├── app/
         │   ├── layout.tsx / page.tsx / globals.css
         │   └── api/
-        │       ├── generate/route.ts        # POST: start an AI job (or demo)
+        │       ├── generate/route.ts        # POST: start an AI job (swap / image / text / keyframe)
         │       ├── generate/[id]/route.ts   # GET: poll job status
-        │       └── gif/route.ts             # POST: video/image → optimised looping GIF
+        │       ├── gif/route.ts             # POST: video/image → optimised looping GIF
+        │       ├── mp4/route.ts             # POST: GIF → MP4 export
+        │       ├── share/route.ts           # POST: host a GIF on Vercel Blob (optional)
+        │       └── status/route.ts          # GET: which features this server has enabled
         ├── components/
-        │   ├── GifStudio.tsx        # main UI: tabs, prompt, settings, generate flow
-        │   ├── ImageDropzone.tsx    # drag & drop upload, downsizes images in-browser
-        │   └── PreviewModal.tsx     # live preview + Download GIF
+        │   ├── GifStudio.tsx        # the studio: modes, inputs, pipeline orchestration, results
+        │   ├── Stage.tsx            # output screen built as Nome's head; his eyes show progress
+        │   ├── Nome.tsx             # mascot (original art + mood eyes on the visor), logo
+        │   ├── GifDrop.tsx / CharacterPicker.tsx / FineTune.tsx / StylePicker.tsx
+        │   ├── ResultActions.tsx    # download GIF/MP4, copy, share, try again, edit
+        │   └── Hero.tsx / Sections.tsx / SiteHeader.tsx / ModePicker.tsx
         └── lib/
-            ├── presets.ts           # style presets, limits, prompt builder (shared)
+            ├── presets.ts           # modes, style presets, limits (shared)
+            ├── gif-info.ts          # tiny GIF parser: frames, delays, size (browser + server)
             ├── validation.ts        # request parsing, data-URL decoding, SSRF guard
-            ├── replicate.ts         # minimal Replicate REST client
-            ├── gif-args.ts          # pure FFmpeg filter-graph builder (unit tested)
-            ├── ffmpeg.ts            # runs FFmpeg, downloads media, size-limit retries
-            └── *.test.ts
+            ├── replicate.ts         # minimal Replicate REST client, one model per step
+            ├── gif-args.ts          # pure FFmpeg argument builders (unit tested)
+            ├── ffmpeg.ts            # runs FFmpeg: GIF↔MP4, model input, GIF encoding
+            └── client/              # browser helpers: uploads, IndexedDB library
 ```
 
 ## 2. How a request flows
 
+**GIF → Character**
+
 ```
-Browser ──POST /api/generate──▶ Replicate (create prediction) ──▶ { id }
-   │  poll every 3s: GET /api/generate/:id ──▶ { status, output: video URL }
-   └─POST /api/gif { videoUrl, fps, width, duration, style, boomerang }
-          └─ download MP4 → FFmpeg: fps + scale → (reverse+concat) → palettegen → paletteuse → .gif
+Browser: parse GIF (frames, delays, size) ── POST /api/generate {mode:"swap", gif, character, scene}
+Server:  FFmpeg GIF → constant-rate 24 fps MP4 (transparency flattened, upscaled to ≥480p, ≤8 s)
+         upload MP4 + character → Wan 2.2 Animate (segments + tracks the original character,
+         re-animates yours frame by frame, composites it into the scene) ── { id }
+Browser: poll GET /api/generate/:id ── output video URL
+         POST /api/gif {videoUrl, fps & duration of the ORIGINAL GIF, width} ── looping GIF
 ```
 
-Generation is **asynchronous** on purpose: video models take 30 s to 3 min, which is longer than a serverless function should block. Once a video exists, changing FPS, size, duration or boomerang **re-renders the GIF without another paid AI call**.
+**Text → GIF with a character**: `/api/generate {mode:"text", character}` starts a keyframe job (`stage:"keyframe"`); when it finishes the browser sends the keyframe URL to `/api/generate {mode:"image", imageUrl}`; the resulting video is encoded like the others.
 
-The GIF is encoded with a 2-pass palette (`palettegen`/`paletteuse`). If the result would exceed Vercel's 4.5 MB response limit, it is re-encoded with fewer colours and frames automatically.
+Generation is **asynchronous** on purpose: video models take 30 s to a few minutes, longer than a serverless function should block. Once a video exists, changing speed, size, length or boomerang **rebuilds the GIF without another paid AI call**.
+
+If a GIF would exceed Vercel's 4.5 MB response limit, it is re-encoded with fewer colours and frames automatically.
+
+### Limits and honest caveats
+
+- Wan 2.2 Animate is trained on human motion (pose skeletons + faces). Swaps work best when the GIF shows **one clear, full-body character** and your character has a roughly humanoid body. Animals, crowds, tiny subjects or heavy motion blur give weaker results.
+- Source GIFs: up to 3 MB and the first 8 seconds. Variable GIF frame delays are preserved by resampling to a constant rate, then the output is re-timed to the original average speed and length.
+- The model input field names for the swap models (`video`, `character_image`) follow the Wan 2.2 Animate models on Replicate. If a model you switch to uses different names, set them via `REPLICATE_SWAP_EXTRA_INPUT` or override the model.
 
 ## 3. Run it locally
 
@@ -75,7 +98,21 @@ npm run dev                 # http://localhost:3000
 
 ### Choosing models
 
-The defaults are `wan-video/wan-2.2-t2v-fast` (text) and `wan-video/wan-2.2-i2v-fast` (image). Any Replicate model that accepts `prompt` (and `image` for image mode) and returns a video URL works. Set `REPLICATE_TEXT_MODEL` / `REPLICATE_IMAGE_MODEL`, and pass model-specific inputs with `REPLICATE_EXTRA_INPUT='{"resolution":"480p"}'`. Check each model's page for its input names and price per run.
+Each pipeline step has its own model, overridable with an env var (see `.env.example`):
+
+| Step | Env var | Default | Inputs sent |
+| --- | --- | --- | --- |
+| Text → video | `REPLICATE_TEXT_MODEL` | `wan-video/wan-2.2-t2v-fast` | `prompt` |
+| Image → video | `REPLICATE_IMAGE_MODEL` | `wan-video/wan-2.2-i2v-fast` | `prompt`, `image` |
+| Character keyframe | `REPLICATE_KEYFRAME_MODEL` | `google/nano-banana` | `prompt`, `image_input[]`, `output_format` |
+| Swap (keep scene) | `REPLICATE_SWAP_MODEL` | `wan-video/wan-2.2-animate-replace` | `video`, `character_image` |
+| Swap (character's scene) | `REPLICATE_MOVE_MODEL` | `wan-video/wan-2.2-animate-animation` | `video`, `character_image` |
+
+Extra model inputs go in JSON env vars: `REPLICATE_EXTRA_INPUT` (video models), `REPLICATE_KEYFRAME_EXTRA_INPUT`, `REPLICATE_SWAP_EXTRA_INPUT`. Check each model's page for its input names and price per run.
+
+### Sharing links (optional)
+
+On phones, **Share** hands the GIF file itself to WhatsApp, iMessage, Telegram and the like (Web Share API). To also get **public links** (for desktop sharing to X, Reddit, email, and "Copy link" where browsers can't copy animated GIFs), connect a [Vercel Blob](https://vercel.com/docs/vercel-blob) store to the project so `BLOB_READ_WRITE_TOKEN` is set. Without it, those buttons explain what's unavailable instead of failing silently.
 
 ## 4. Create the GitHub repo & deploy (step by step)
 
@@ -134,7 +171,8 @@ Every push to `main` now runs lint → typecheck → tests → build, then deplo
 ## 5. Security notes
 
 - `/api/gif` only downloads from `*.replicate.delivery` over HTTPS, so it can't be used to fetch arbitrary URLs (SSRF).
-- Inputs are validated and clamped server-side (FPS 4–24, 1–6 s, fixed widths, 4 MB images).
+- Inputs are validated and clamped server-side (FPS 4–30, 0.5–8 s, fixed widths, 4 MB images, 3 MB GIFs that must parse as animated GIFs).
+- `/api/mp4` and `/api/share` only accept bytes that parse as a GIF, capped at the app's own GIF size limit. `/api/share` is unauthenticated: anyone who can reach the site can upload GIFs to your Blob store, so add rate limiting if you enable it.
 - There is **no rate limiting or auth**. Before sharing a public URL with a real API token, add protection (e.g. Vercel Firewall rate limits, or a login) and set a spend limit on Replicate.
 
 ## License

@@ -42,18 +42,35 @@ export const STYLE_PRESETS = {
 export type StyleId = keyof typeof STYLE_PRESETS;
 export const STYLE_IDS = Object.keys(STYLE_PRESETS) as StyleId[];
 
-export type Mode = "text" | "image";
+/**
+ * The three workflows:
+ *  - swap:  replace the character in an existing GIF with your own character
+ *  - image: animate a still image of your character
+ *  - text:  describe an animation, optionally featuring your character
+ */
+export type Mode = "swap" | "image" | "text";
+export const MODES: Mode[] = ["swap", "image", "text"];
+
+/** What the AI should do with the original GIF's scene in swap mode. */
+export type SwapScene = "original" | "character";
 
 /** Output widths offered in the UI. Height follows the source aspect ratio. */
 export const RESOLUTIONS = [256, 320, 384, 480] as const;
 export type Resolution = (typeof RESOLUTIONS)[number];
 
 export const LIMITS = {
-  fps: { min: 4, max: 24, default: 12 },
-  duration: { min: 1, max: 6, default: 3 }, // seconds
+  fps: { min: 4, max: 30, default: 12 },
+  duration: { min: 1, max: 6, default: 3 }, // seconds, for generated clips
+  /** Rebuilt GIFs may match the source GIF's length, so allow a wider range. */
+  outputDuration: { min: 0.5, max: 8 },
   promptMaxLength: 500,
   // Vercel caps request bodies at 4.5 MB; the client downsizes uploads well below that.
   imageMaxBytes: 4 * 1024 * 1024,
+  // GIFs can't be shrunk in the browser; base64 adds a third, so 3 MB keeps the
+  // JSON body under Vercel's limit even with a character image alongside.
+  gifMaxBytes: 3 * 1024 * 1024,
+  /** Only the first few seconds of a source GIF are sent to the AI. */
+  swapMaxSeconds: 8,
 } as const;
 
 export interface GifOptions {

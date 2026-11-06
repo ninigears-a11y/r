@@ -97,3 +97,64 @@ export function buildFfmpegArgs(
     outPath,
   ];
 }
+
+/** Composite every frame over white so transparent GIF areas don't turn black. */
+const FLATTEN = "format=rgba,split[fg][bgsrc];[bgsrc]drawbox=color=white:t=fill[bg];[bg][fg]overlay=format=auto";
+
+/**
+ * Size a small GIF up for an AI video model: the shorter side becomes at least
+ * `minShort` px (models work at ~480p+), the longer side at most `maxLong`.
+ */
+export function modelVideoSize(width: number, height: number, minShort = 480, maxLong = 1280) {
+  const up = Math.max(1, minShort / Math.min(width, height));
+  const scale = Math.min(up, maxLong / Math.max(width, height));
+  return { width: even(width * scale), height: even(height * scale) };
+}
+
+/**
+ * GIF → H.264 MP4 that an AI video model can read. Variable GIF frame delays
+ * are kept by resampling to a constant 24 fps (frames are duplicated, never
+ * re-timed), and the clip is capped at `maxSeconds`.
+ */
+export function buildModelVideoArgs(
+  inPath: string,
+  outPath: string,
+  size: { width: number; height: number },
+  maxSeconds: number,
+): string[] {
+  return [
+    "-hide_banner", "-loglevel", "error", "-y",
+    "-t", String(maxSeconds),
+    "-i", inPath,
+    "-filter_complex",
+    `[0:v]${FLATTEN},fps=24,scale=${size.width}:${size.height}:flags=lanczos,format=yuv420p`,
+    "-an",
+    "-c:v", "libx264", "-preset", "veryfast", "-crf", "16",
+    "-movflags", "+faststart",
+    outPath,
+  ];
+}
+
+/**
+ * Finished GIF → shareable MP4. Messaging apps don't loop MP4s by themselves,
+ * so short GIFs are repeated `loops` times to give the clip some length.
+ */
+export function buildMp4Args(inPath: string, outPath: string, loops: number): string[] {
+  return [
+    "-hide_banner", "-loglevel", "error", "-y",
+    "-stream_loop", String(Math.max(0, loops - 1)),
+    "-i", inPath,
+    "-filter_complex",
+    `[0:v]${FLATTEN},scale=trunc(iw/2)*2:trunc(ih/2)*2:flags=neighbor,format=yuv420p`,
+    "-an",
+    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+    "-movflags", "+faststart",
+    outPath,
+  ];
+}
+
+/** How many times to repeat a GIF so the MP4 lasts at least ~3 s (max 10 s). */
+export function mp4Loops(durationMs: number): number {
+  if (durationMs <= 0) return 1;
+  return Math.max(1, Math.min(Math.ceil(3000 / durationMs), Math.floor(10000 / durationMs)));
+}

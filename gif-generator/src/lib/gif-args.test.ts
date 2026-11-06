@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildFfmpegArgs } from "./gif-args";
+import { buildFfmpegArgs, buildModelVideoArgs, buildMp4Args, modelVideoSize, mp4Loops } from "./gif-args";
 import { DEFAULT_GIF_OPTIONS } from "./presets";
 
 const graphOf = (args: string[]) => args[args.indexOf("-filter_complex") + 1];
@@ -37,5 +37,27 @@ describe("buildFfmpegArgs", () => {
     const args = buildFfmpegArgs({ kind: "demo" }, DEFAULT_GIF_OPTIONS, "o.gif", 64);
     expect(args).toContain("lavfi");
     expect(graphOf(args)).toContain("max_colors=64");
+  });
+});
+
+describe("character-swap and MP4 helpers", () => {
+  it("upscales small GIFs to model resolution and keeps sizes even", () => {
+    expect(modelVideoSize(200, 150)).toEqual({ width: 640, height: 480 });
+    expect(modelVideoSize(1920, 1080)).toEqual({ width: 1280, height: 720 });
+    expect(modelVideoSize(481, 481)).toEqual({ width: 482, height: 482 });
+  });
+
+  it("builds a constant-frame-rate MP4 for the model, capped in length", () => {
+    const args = buildModelVideoArgs("in.gif", "out.mp4", { width: 640, height: 480 }, 8);
+    expect(args.slice(args.indexOf("-t"), args.indexOf("-t") + 2)).toEqual(["-t", "8"]);
+    expect(args.join(" ")).toContain("fps=24,scale=640:480");
+    expect(args).toContain("libx264");
+  });
+
+  it("loops short GIFs so the MP4 lasts a few seconds", () => {
+    expect(mp4Loops(600)).toBe(5);
+    expect(mp4Loops(4000)).toBe(1);
+    expect(mp4Loops(0)).toBe(1);
+    expect(buildMp4Args("a.gif", "b.mp4", 5)).toContain("4");
   });
 });

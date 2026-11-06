@@ -12,7 +12,7 @@ const HINTS: Record<StyleId, string> = {
 
 /** Tiny abstract swatches so each style is recognisable at a glance. */
 function Swatch({ id }: { id: StyleId }) {
-  const common = "size-7 shrink-0 rounded-md border border-black/5";
+  const common = "size-6 shrink-0 rounded-full border border-black/10";
   switch (id) {
     case "pixel-art":
       return (
@@ -42,34 +42,21 @@ interface Props {
 export function StylePicker({ value, onChange, disabled }: Props) {
   return (
     <fieldset disabled={disabled}>
-      <legend className="text-sm font-medium text-ink">Style</legend>
-      <div className="mt-2.5 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+      <legend className="sr-only">Style</legend>
+      <div className="flex flex-wrap gap-2">
         {STYLE_IDS.map((id) => {
           const active = value === id;
           return (
             <label
               key={id}
-              className={`relative flex cursor-pointer items-center gap-2.5 rounded-xl border px-2.5 py-2 transition-all duration-150 has-[:focus-visible]:ring-4 has-[:focus-visible]:ring-brand/15 ${
-                active
-                  ? "border-brand bg-brand-soft/60"
-                  : "border-line bg-canvas hover:border-line-strong hover:bg-subtle"
+              title={HINTS[id]}
+              className={`flex cursor-pointer items-center gap-2 rounded-full border py-1.5 pr-3.5 pl-1.5 text-sm font-medium transition-all duration-150 has-[:focus-visible]:ring-4 has-[:focus-visible]:ring-brand/20 ${
+                active ? "border-ink bg-ink text-white" : "border-line bg-canvas text-ink hover:border-line-strong hover:bg-subtle"
               }`}
             >
-              <input
-                type="radio"
-                name="style"
-                value={id}
-                checked={active}
-                onChange={() => onChange(id)}
-                className="sr-only"
-              />
+              <input type="radio" name="style" value={id} checked={active} onChange={() => onChange(id)} className="sr-only" />
               <Swatch id={id} />
-              <span className="min-w-0">
-                <span className={`block truncate text-sm font-medium ${active ? "text-brand-hover" : "text-ink"}`}>
-                  {STYLE_PRESETS[id].label}
-                </span>
-                <span className="block truncate text-xs text-muted">{HINTS[id]}</span>
-              </span>
+              {STYLE_PRESETS[id].label}
             </label>
           );
         })}

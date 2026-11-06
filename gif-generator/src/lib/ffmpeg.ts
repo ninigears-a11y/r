@@ -6,8 +6,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import ffmpegStatic from "ffmpeg-static";
 
-import { buildFfmpegArgs, type GifSource } from "./gif-args";
-import type { GifOptions } from "./presets";
+import {
+  buildFfmpegArgs,
+  buildModelVideoArgs,
+  buildMp4Args,
+  modelVideoSize,
+  mp4Loops,
+  type GifSource,
+} from "./gif-args";
+import type { GifInfo } from "./gif-info";
+import { LIMITS, type GifOptions } from "./presets";
 
 /** Vercel rejects function responses above 4.5 MB, so stay safely under it. */
 export const MAX_GIF_BYTES = 4.2 * 1024 * 1024;
@@ -113,4 +121,40 @@ export async function createGif(input: GifInput, options: GifOptions): Promise<B
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+}
+
+async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(path.join(tmpdir(), "gif-"));
+  try {
+    return await fn(dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Step 1 of the character-swap pipeline: turn the uploaded GIF into a clean
+ * MP4 (frames flattened, timing preserved, upscaled to model resolution).
+ */
+export function gifToModelVideo(gif: Buffer, info: GifInfo): Promise<Buffer> {
+  return withTempDir(async (dir) => {
+    const input = path.join(dir, "in.gif");
+    const output = path.join(dir, "model.mp4");
+    await writeFile(input, gif);
+    await runFfmpeg(
+      buildModelVideoArgs(input, output, modelVideoSize(info.width, info.height), LIMITS.swapMaxSeconds),
+    );
+    return readFile(output);
+  });
+}
+
+/** Convert a finished GIF into an MP4 for sharing. */
+export function gifToMp4(gif: Buffer, info: GifInfo): Promise<Buffer> {
+  return withTempDir(async (dir) => {
+    const input = path.join(dir, "in.gif");
+    const output = path.join(dir, "out.mp4");
+    await writeFile(input, gif);
+    await runFfmpeg(buildMp4Args(input, output, mp4Loops(info.durationMs)));
+    return readFile(output);
+  });
 }
